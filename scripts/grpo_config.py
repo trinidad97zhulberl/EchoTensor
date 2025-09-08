@@ -1,24 +1,25 @@
 from model_utility import get_model_architecture, get_model_num_params, get_use_liger, disable_flash_attention, get_use_vllm, get_gradient_checkpointing, get_gpu_count
 from copy import deepcopy
+from lrs_lookup import get_grpo_lr
 
 
 GRPO_CONFIG = {
     "0_1_b": {
-        "lr": 0.0002,
+        "lr": 0.00015,
         "distributed": "ddp",
         "gpu_count": 1,
-        "batch_size": 45,
+        "batch_size": 40,
         "vllm_gpu_memory_utilization": 0.4
     },
     "1_2_b": {
-        "lr": 8e-5,
+        "lr": 7.5e-5,
         "distributed": "ddp",
         "gpu_count": 1,
-        "batch_size": 45,
+        "batch_size": 40,
         "vllm_gpu_memory_utilization": 0.4
     },
     "2_4_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 42,
@@ -26,7 +27,7 @@ GRPO_CONFIG = {
         "use_lora": True
     },
     "4_5_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 42,
@@ -34,7 +35,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.4
     },
     "5_6_b": {
-        "lr": 6.5e-5,
+        "lr": 6e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 42,
@@ -42,7 +43,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.4
     },
     "6_9_b": {
-        "lr": 6.5e-5,
+        "lr": 6e-5,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 24,
@@ -50,7 +51,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.5
     },
     "9_12_b": {
-        "lr": 7e-5,   
+        "lr": 6.5e-5,   
         "distributed": "ddp",
         "gpu_count": 4,
         "use_lora": True,
@@ -58,7 +59,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.6
     },
     "12_15_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ddp",
         "gpu_count": 4,
         "use_lora": True,
@@ -66,7 +67,7 @@ GRPO_CONFIG = {
         "vllm_gpu_memory_utilization": 0.8,
     },
     "15_20_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ddp",
         "gpu_count": 4,
         "use_lora": True,
@@ -75,7 +76,7 @@ GRPO_CONFIG = {
         "use_vllm": False,
     },
     "20_40_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ddp",
         "gpu_count": 8,
         "use_lora": True,
@@ -85,7 +86,7 @@ GRPO_CONFIG = {
         "use_4bit": True
     },
     "40_80_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ddp",
         "gpu_count": 8,
         "use_lora": True,
@@ -136,7 +137,7 @@ def get_grpo_config(param_nums: int) -> dict:
     else:
         print(f"Model size {param_nums} is not supported")
         return {
-            "lr": 4.5e-5,
+            "lr": 4e-5,
             "distributed": "ds",
             "gpu_count": 8,
             "batch_size": 6,
@@ -227,7 +228,7 @@ def get_training_json(train_info: dict) -> dict:
     config = get_grpo_config(param_nums)
     print(f"config: {config}")
     run_config = {
-        "epoch_num": 3,
+        "epoch_num": 2,
         "batch_size": config["batch_size"],
         "learning_rate": config["lr"],
         "min_lr_rate": 0.25,
@@ -311,6 +312,17 @@ def get_training_json(train_info: dict) -> dict:
         run_config["learning_rate"] = 1e-5
     if model_name in ["unsloth/codegemma-7b", "unsloth/gemma-7b-it"]:
         run_config["learning_rate"] = 8e-6
+    
+    if train_info["find_lk_lr"]:
+        # get lr from lrs_lookup.py
+        lr = get_grpo_lr(model_name)
+        if lr is not None:
+            print(f"Using lr from lk: {lr}", flush=True)
+            run_config["learning_rate"] = lr
+        else:
+            print(f"Using lr from config: {run_config['learning_rate']}", flush=True)
+    
+    run_config["learning_rate"] *= train_info["reg_ratio"]
         
     run_cmd = get_run_cmd(run_config, run_config["gpu_nums"])
     

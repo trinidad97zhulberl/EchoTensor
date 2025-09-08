@@ -1,5 +1,6 @@
 from model_utility import get_model_architecture, get_model_num_params, get_use_liger, disable_flash_attention, get_data_size, get_gpu_count
 from copy import deepcopy
+from lrs_lookup import get_instruct_lr
 
 
 FIXED_BS_CONFIG = {
@@ -13,60 +14,60 @@ FIXED_BS_CONFIG = {
 
 INSTRUCT_CONFIG = {
     "0_1_b": {
-        "lr": 0.0002,
+        "lr": 0.0001,
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 140,
         "use_lora": False
     },
     "1_2_b": {
-        "lr": 0.0002,
+        "lr": 0.0001,
         "distributed": "ddp",
         "gpu_count": 1,
         "use_lora": False,
         "batch_size": 100,
     },
     "2_4_b": {
-        "lr": 8.0e-5,
+        "lr": 7.5e-5,
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 48,
     },
     "4_5_b": {
-        "lr": 7.5e-5,
+        "lr": 7e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 40,
     },
     "5_9_b": {
-        "lr": 4e-5,
+        "lr": 3.5e-5,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 28,
     },
     "9_12_b": {
-        "lr": 1.2e-4,
+        "lr": 1e-4,
         "distributed": "ddp",
         "gpu_count": 2,
         "use_lora": True,
         "batch_size": 32,
     },
     "12_15_b": {
-        "lr": 1.2e-4,
+        "lr": 1e-4,
         "distributed": "ds",
         "gpu_count": 4,
         "use_lora": True,
         "batch_size": 30,
     },
     "15_40_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ds",
         "gpu_count": 4,
         "use_lora": True,
         "batch_size": 18,
     },
     "40_80_b": {
-        "lr": 8.5e-5,
+        "lr": 8e-5,
         "distributed": "ds",
         "gpu_count": 8,
         "use_lora": True,
@@ -80,7 +81,7 @@ for key in INSTRUCT_CONFIG:
 
 def get_instruct_config(param_nums: int) -> dict:
     result = {
-            "lr": 4.5e-5,
+            "lr": 4e-5,
             "distributed": "ds",
             "gpu_count": 8,
             "batch_size": 6,
@@ -170,6 +171,11 @@ def get_run_cmd(config: dict, gpu_nums: int):
 
     for key, value in config.items():
         template = template.replace("{" + key + "}", str(value))
+        
+    if config.get("use_attn_implementation", ""):
+        use_attn_implementation = config["use_attn_implementation"]
+        template = template + f""" --use_attn_implementation {use_attn_implementation}"""
+        
     return template
 
 
@@ -180,7 +186,7 @@ def get_training_json(train_info: dict) -> dict:
     param_nums = get_model_num_params(model_name, model_path)
     config = get_instruct_config(param_nums)
     run_config = {
-        "epoch_num": 4,
+        "epoch_num": 3,
         "batch_size": config["batch_size"],
         "learning_rate": config["lr"],
         "min_lr_rate": 0.25,
@@ -188,14 +194,20 @@ def get_training_json(train_info: dict) -> dict:
         "optimizer": "paged_adamw_8bit",
         "use_lora": config.get("use_lora", False),
         "disable_fa": disable_flash_attention(model_architecture, model_name),
-        "packing": False,
+        "packing": "True",
         "gpu_nums": config["gpu_count"],
         "output_dir": train_info["output_dir"],
         "request_path": train_info["request_path"],
         "distributed": config.get("distributed", "ddp"),
         "gradient_checkpointing": "True",
-        "gradient_accumulation_steps": 4
+        "gradient_accumulation_steps": 4,
+        "use_attn_implementation": "kernels-community/vllm-flash-attn3" if train_info.get("is_openai", False) else ""
     }
+    
+    # there are models that do not support packing, so we need to check if the model supports packing
+    if run_config["disable_fa"] == "True" or model_architecture.strip().lower() in ["optforcausallm"]:
+        run_config["packing"] = "False"
+    
     # data_size = get_data_size(train_info["request_path"])
     
     # if run_config["disable_fa"]: # if FA is not usable
@@ -236,10 +248,22 @@ def get_training_json(train_info: dict) -> dict:
     else:
         run_config["gradient_accumulation_steps"] = int(64 / data_per_step)
     
+    if model_architecture.strip().lower() in ["gptossforcausallm"]:
+        run_config["use_lora"] = False # currently, gptoss does not support lora
+    
+    if train_info["find_lk_lr"]:
+        # get lr from lrs_lookup.py
+        lr = get_instruct_lr(model_name)
+        if lr is not None:
+            print(f"Using lr from lk: {lr}", flush=True)
+            run_config["learning_rate"] = lr
+        else:
+            print(f"Using lr from config: {run_config['learning_rate']}", flush=True)
+    
+    run_config["learning_rate"] *= train_info["reg_ratio"]
     run_cmd = get_run_cmd(run_config, run_config["gpu_nums"])
     train_request = deepcopy(train_info)
     train_request["save_before_remaining_time"] = 3
-    train_request["min_steps"] = 100
     train_request["adjust_batch_size"] = False
     train_request["periodic_save_steps"] = 500
     

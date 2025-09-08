@@ -1,43 +1,43 @@
 from model_utility import get_model_architecture, get_model_num_params, get_use_liger, disable_flash_attention, get_gradient_checkpointing, get_gpu_count
 from copy import deepcopy
-
+from lrs_lookup import get_dpo_lr
 
 DPO_CONFIG = {
     "0_1_b": {
-        "lr": 1.4e-5,
+        "lr": 1.35e-5,
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 16,
     },
     "1_2_b": {
-        "lr": 8.9e-6,
+        "lr": 8.7e-6,
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 12,
     },
     "2_4_b": {
-        "lr": 6.8e-6,
+        "lr": 6.5e-6,
         "distributed": "ddp",
         "gpu_count": 2,
         "batch_size": 12,
         "use_lora": True
     },
     "4_5_b": {
-        "lr": 6.35e-6,
+        "lr": 6.25e-6,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 12,
         "use_lora": True
     },
     "5_9_b": {
-        "lr": 7.8e-6,
+        "lr": 7.5e-6,
         "distributed": "ddp",
         "gpu_count": 4,
         "batch_size": 8,
         "use_lora": True
     },
     "9_12_b": {
-        "lr": 5.5e-6,
+        "lr": 5e-6,
         "distributed": "ds",
         "gpu_count": 4,
         "use_lora": True,
@@ -45,7 +45,7 @@ DPO_CONFIG = {
         "gradient_checkpointing": False
     },
     "12_14_b": {
-        "lr": 8.7e-6,
+        "lr": 8.5e-6,
         "distributed": "ds",
         "gpu_count": 4,
         "use_lora": True,
@@ -53,7 +53,7 @@ DPO_CONFIG = {
         "gradient_checkpointing": False
     },
     "14_15_b": {
-        "lr": 8.9e-6,
+        "lr": 8.5e-6,
         "distributed": "ds",
         "gpu_count": 8,
         "use_lora": True,
@@ -61,7 +61,7 @@ DPO_CONFIG = {
         "gradient_checkpointing": False
     },
     "15_40_b": {
-        "lr": 8.5e-6,
+        "lr": 8e-6,
         "distributed": "ds",
         "gpu_count": 8,
         "use_lora": True,
@@ -69,7 +69,7 @@ DPO_CONFIG = {
         "gradient_checkpointing": False
     },
     "40_80_b": {
-        "lr": 8.5e-6,
+        "lr": 8e-6,
         "distributed": "ds",
         "gpu_count": 8,
         "use_lora": True,
@@ -105,9 +105,9 @@ def get_config(param_nums: int) -> dict:
     elif param_nums < 80_000_000_000:
         result = DPO_CONFIG["40_80_b"]
     else:
-        print(f"Model size {param_nums} is not supported")
+        print(f"Model size {param_nums} is not supported", flush=True)
         result = {
-            "lr": 4.5e-5,
+            "lr": 4e-5,
             "distributed": "ds",
             "gpu_count": 8,
             "batch_size": 6,
@@ -177,6 +177,11 @@ def get_run_cmd(config: dict, gpu_nums: int):
 
     for key, value in config.items():
         template = template.replace("{" + key + "}", str(value))
+    
+    if config.get("use_attn_implementation", ""):
+        use_attn_implementation = config["use_attn_implementation"]
+        template = template + f""" --use_attn_implementation {use_attn_implementation}"""
+        
     return template
 
 
@@ -187,7 +192,7 @@ def get_training_json(train_info: dict) -> dict:
     param_nums = get_model_num_params(model_name, model_path)
     config = get_config(param_nums)
     run_config = {
-        "epoch_num": 4,
+        "epoch_num": 3,
         "batch_size": config["batch_size"],
         "learning_rate": config["lr"],
         "min_lr_rate": 0.25,
@@ -200,7 +205,8 @@ def get_training_json(train_info: dict) -> dict:
         "request_path": train_info["request_path"],
         "distributed": config.get("distributed", "ddp"),
         "gradient_checkpointing": get_gradient_checkpointing(model_name),
-        "gradient_accumulation_steps": 1
+        "gradient_accumulation_steps": 1,
+        "use_attn_implementation": "kernels-community/vllm-flash-attn3" if train_info.get("is_openai", False) else ""
     }
     
     if not config.get("gradient_checkpointing", True):
@@ -209,7 +215,17 @@ def get_training_json(train_info: dict) -> dict:
     total_batch_size = run_config["batch_size"] * run_config["gpu_nums"]
     if total_batch_size < 64:
         run_config["gradient_accumulation_steps"] = min(4, int(64 / total_batch_size))
-        
+    
+    if train_info["find_lk_lr"]:
+        # get lr from lrs_lookup.py
+        lr = get_dpo_lr(model_name)
+        if lr is not None:
+            print(f"Using lr from lk: {lr}", flush=True)
+            run_config["learning_rate"] = lr
+        else:
+            print(f"Using lr from config: {run_config['learning_rate']}", flush=True)
+    
+    run_config["learning_rate"] *= train_info["reg_ratio"]
     run_cmd = get_run_cmd(run_config, run_config["gpu_nums"])
     train_request = deepcopy(train_info)
     train_request["save_before_remaining_time"] = 3
